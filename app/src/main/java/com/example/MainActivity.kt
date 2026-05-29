@@ -40,6 +40,13 @@ import java.text.DecimalFormat
 import java.text.DecimalFormatSymbols
 import java.text.SimpleDateFormat
 import java.util.*
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.result.contract.ActivityResultContract
+import android.content.Intent
+import android.app.Activity
+import androidx.lifecycle.lifecycleScope
+import android.widget.Toast
+import kotlinx.coroutines.launch
 
 enum class AppTab(val title: String, val icon: androidx.compose.ui.graphics.vector.ImageVector) {
     CALCULATOR("Kalkulator", Icons.Default.ShoppingCart),
@@ -52,9 +59,83 @@ enum class PriceListSubTab(val title: String) {
     COMPLEX_PRODUCTS("Zestawy złożone")
 }
 
+class CreateJsonDocumentContract : ActivityResultContract<String, android.net.Uri?>() {
+    override fun createIntent(context: android.content.Context, input: String): Intent {
+        return Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "application/json"
+            putExtra(Intent.EXTRA_TITLE, input)
+        }
+    }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): android.net.Uri? {
+        return if (intent == null || resultCode != Activity.RESULT_OK) null else intent.data
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private val viewModel: ScrapViewModel by viewModels {
         ScrapViewModel.Factory(application)
+    }
+
+    private val exportPriceListLauncher = registerForActivityResult(
+        CreateJsonDocumentContract()
+    ) { uri ->
+        uri?.let { saveJsonToUri(it) }
+    }
+
+    private val importPriceListLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri?.let { loadJsonFromUri(it) }
+    }
+
+    fun triggerExport() {
+        try {
+            exportPriceListLauncher.launch("cennik_zlomu.json")
+        } catch (e: Exception) {
+            Toast.makeText(this, "Błąd systemowy: Brak aplikacji do obsługi eksportu (ACTION_CREATE_DOCUMENT).", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun triggerImport() {
+        try {
+            importPriceListLauncher.launch("application/json")
+        } catch (e: Exception) {
+            Toast.makeText(this, "Błąd systemowy: Brak aplikacji do obsługi wyboru plików (GetContent).", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun saveJsonToUri(uri: android.net.Uri) {
+        lifecycleScope.launch {
+            try {
+                val jsonString = viewModel.exportPriceListJson()
+                contentResolver.openOutputStream(uri)?.use { outputStream ->
+                    outputStream.write(jsonString.toByteArray(Charsets.UTF_8))
+                }
+                Toast.makeText(this@MainActivity, "Cennik został pomyślnie wyeksportowany!", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Błąd eksportu: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun loadJsonFromUri(uri: android.net.Uri) {
+        lifecycleScope.launch {
+            try {
+                contentResolver.openInputStream(uri)?.use { inputStream ->
+                    val jsonString = inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val result = viewModel.importPriceListJson(jsonString)
+                    if (result.success) {
+                        Toast.makeText(this@MainActivity, "Pomyślnie zaimportowano: ${result.message}", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(this@MainActivity, "Błąd importu: ${result.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Błąd odczytu pliku: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -101,6 +182,7 @@ fun ScrapCalculationsApp(viewModel: ScrapViewModel) {
     Scaffold(
         modifier = Modifier.fillMaxSize(),
         topBar = {
+            var showDatabaseDialog by remember { mutableStateOf(false) }
             TopAppBar(
                 title = {
                     Row(
@@ -120,11 +202,28 @@ fun ScrapCalculationsApp(viewModel: ScrapViewModel) {
                         )
                     }
                 },
+                actions = {
+                    IconButton(
+                        onClick = { showDatabaseDialog = true },
+                        modifier = Modifier.testTag("database_management_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Zarządzanie bazą danych"
+                        )
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.background,
                     titleContentColor = MaterialTheme.colorScheme.onBackground
                 )
             )
+            if (showDatabaseDialog) {
+                DatabaseManagementDialog(
+                    viewModel = viewModel,
+                    onDismiss = { showDatabaseDialog = false }
+                )
+            }
         },
         bottomBar = {
             NavigationBar(
@@ -188,6 +287,238 @@ fun ScrapCalculationsApp(viewModel: ScrapViewModel) {
     }
 }
 
+fun android.content.Context.findActivity(): MainActivity? {
+    var currentContext = this
+    while (currentContext is android.content.ContextWrapper) {
+        if (currentContext is MainActivity) {
+            return currentContext
+        }
+        currentContext = currentContext.baseContext
+    }
+    return null
+}
+
+@Composable
+fun DatabaseManagementDialog(
+    viewModel: ScrapViewModel,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val activity = context.findActivity()
+
+    var showClearHistoryConfirm by remember { mutableStateOf(false) }
+    var showClearPriceListConfirm by remember { mutableStateOf(false) }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 6.dp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(24.dp)
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Header
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Text(
+                        text = "Zarządzanie Danymi",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                HorizontalDivider()
+
+                // Section 1: Backup (Export / Import)
+                Text(
+                    text = "Kopia zapasowa i cennik",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Text(
+                    text = "Wyeksportuj obecny cennik (produkty proste i złożone) do pliku JSON lub zaimportuj wcześniejszy plik, aby zsynchronizować zmiany.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            activity?.triggerExport()
+                            onDismiss()
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("export_backup_button"),
+                        contentPadding = PaddingValues(vertical = 12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Share,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Eksportuj")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            activity?.triggerImport()
+                            onDismiss()
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("import_backup_button"),
+                        contentPadding = PaddingValues(vertical = 12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Importuj")
+                    }
+                }
+
+                HorizontalDivider()
+
+                // Section 2: Destructive actions
+                Text(
+                    text = "Opcje czyszczenia",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.error
+                )
+
+                // Button for Clear Calculations History
+                Button(
+                    onClick = { showClearHistoryConfirm = true },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer,
+                        contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("clear_history_trigger_button"),
+                    contentPadding = PaddingValues(vertical = 12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Wyczyść historię kalkulacji")
+                }
+
+                // Button for Clear Price List
+                Button(
+                    onClick = { showClearPriceListConfirm = true },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("clear_pricelist_trigger_button"),
+                    contentPadding = PaddingValues(vertical = 12.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Delete,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Wyczyść cennik i bazę")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Close Button
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text("Zamknij")
+                }
+            }
+        }
+    }
+
+    // Confirmation dialogues
+    if (showClearHistoryConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearHistoryConfirm = false },
+            title = { Text("Wyczyścić historię?") },
+            text = { Text("Czy na pewno chcesz trwale usunąć wszystkie zapisane historyczne kalkulacje? Ta operacja jest nieodwracalna.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.clearAllHistory()
+                        showClearHistoryConfirm = false
+                        Toast.makeText(context, "Historia kalkulacji została wyczyszczona!", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Tak, wyczyść")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearHistoryConfirm = false }) {
+                    Text("Anuluj")
+                }
+            }
+        )
+    }
+
+    if (showClearPriceListConfirm) {
+        AlertDialog(
+            onDismissRequest = { showClearPriceListConfirm = false },
+            title = { Text("Wyczyścić cennik?") },
+            text = { Text("Czy na pewno chcesz usunąć cały cennik (metale oraz produkty złożone)? Spowoduje to również wyczyszczenie bieżącego koszyka kalkulacji.") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.clearPriceList()
+                        showClearPriceListConfirm = false
+                        Toast.makeText(context, "Cennik został wyczyszczony!", Toast.LENGTH_SHORT).show()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Tak, wyczyść")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearPriceListConfirm = false }) {
+                    Text("Anuluj")
+                }
+            }
+        )
+    }
+}
+
 // --- TAB 1: CALCULATOR SCREEN ---
 @Composable
 fun CalculatorScreen(
@@ -208,8 +539,14 @@ fun CalculatorScreen(
     var selectedUnit by remember { mutableStateOf("szt.") }
     var weightPerPieceText by remember { mutableStateOf("1.0") }
 
-    // Auto-select first element if none selected
+    // Auto-select first element if none selected, or clear if deleted
     LaunchedEffect(materials, complexProducts) {
+        if (selectedMaterial != null && !materials.any { it.id == selectedMaterial?.id }) {
+            selectedMaterial = null
+        }
+        if (selectedComplexProduct != null && !complexProducts.any { it.id == selectedComplexProduct?.id }) {
+            selectedComplexProduct = null
+        }
         if (selectedMaterial == null && !isComplexSelected && materials.isNotEmpty()) {
             selectedMaterial = materials.first()
         }
@@ -488,8 +825,9 @@ fun CalculatorScreen(
                         OutlinedTextField(
                             value = weightPerPieceText,
                             onValueChange = { input ->
-                                if (input.isEmpty() || input.toDoubleOrNull() != null || input.endsWith(".") || input.endsWith(",")) {
-                                    weightPerPieceText = input.replace(",", ".")
+                                val normalized = input.replace(",", ".")
+                                if (normalized.isEmpty() || normalized.toDoubleOrNull() != null || normalized.endsWith(".")) {
+                                    weightPerPieceText = normalized
                                 }
                             },
                             label = { Text("Masa 1 sztuki (kg)") },
@@ -519,8 +857,9 @@ fun CalculatorScreen(
                         OutlinedTextField(
                             value = quantityText,
                             onValueChange = { input ->
-                                if (input.isEmpty() || input.toDoubleOrNull() != null || input.endsWith(".") || input.endsWith(",")) {
-                                    quantityText = input.replace(",", ".")
+                                val normalized = input.replace(",", ".")
+                                if (normalized.isEmpty() || normalized.toDoubleOrNull() != null || normalized.endsWith(".")) {
+                                    quantityText = normalized
                                 }
                             },
                             label = { Text("Ilość / masa") },
@@ -1712,8 +2051,9 @@ fun ComplexProductFormDialog(
                                 OutlinedTextField(
                                     value = newCompQtyStr,
                                     onValueChange = { input ->
-                                        if (input.isEmpty() || input.toDoubleOrNull() != null || input.endsWith(".") || input.endsWith(",")) {
-                                            newCompQtyStr = input.replace(",", ".")
+                                        val normalized = input.replace(",", ".")
+                                        if (normalized.isEmpty() || normalized.toDoubleOrNull() != null || normalized.endsWith(".")) {
+                                            newCompQtyStr = normalized
                                         }
                                     },
                                     label = { Text("Masa zawartości") },

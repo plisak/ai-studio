@@ -281,6 +281,198 @@ class ScrapViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // --- COOP / BACKUP & CLEAR ACTIONS ---
+    fun clearAllHistory() {
+        viewModelScope.launch {
+            repository.clearAllHistory()
+            _selectedCalculationId.value = null
+        }
+    }
+
+    fun clearPriceList() {
+        viewModelScope.launch {
+            repository.clearPriceList()
+        }
+    }
+
+    data class ImportResult(val success: Boolean, val message: String)
+
+    suspend fun exportPriceListJson(): String {
+        val materialsList = repository.allMaterials.first()
+        val complexList = repository.allComplexProducts.first()
+        val componentsList = repository.allComplexProductComponents.first()
+        
+        val root = org.json.JSONObject()
+        
+        // 1. Materials
+        val materialsArray = org.json.JSONArray()
+        for (m in materialsList) {
+            val matObj = org.json.JSONObject()
+            matObj.put("name", m.name)
+            matObj.put("pricePerUnit", m.pricePerUnit)
+            matObj.put("unit", m.unit)
+            matObj.put("category", m.category)
+            matObj.put("isDefault", m.isDefault)
+            matObj.put("deleted", false)
+            materialsArray.put(matObj)
+        }
+        root.put("materials", materialsArray)
+        
+        // 2. Complex products
+        val complexArray = org.json.JSONArray()
+        for (cp in complexList) {
+            val cpObj = org.json.JSONObject()
+            cpObj.put("name", cp.name)
+            cpObj.put("description", cp.description)
+            cpObj.put("isDefault", cp.isDefault)
+            cpObj.put("deleted", false)
+            
+            val compArray = org.json.JSONArray()
+            val matchComps = componentsList.filter { it.productId == cp.id }
+            for (comp in matchComps) {
+                val matName = materialsList.find { it.id == comp.materialId }?.name ?: ""
+                if (matName.isNotEmpty()) {
+                    val compObj = org.json.JSONObject()
+                    compObj.put("materialName", matName)
+                    compObj.put("quantity", comp.quantity)
+                    compArray.put(compObj)
+                }
+            }
+            cpObj.put("components", compArray)
+            complexArray.put(cpObj)
+        }
+        root.put("complexProducts", complexArray)
+        
+        return root.toString(4) // 4 spaces indentation indent
+    }
+
+    suspend fun importPriceListJson(jsonString: String): ImportResult {
+        return try {
+            val root = org.json.JSONObject(jsonString)
+            
+            // 1. Materials
+            val materialsArray = root.optJSONArray("materials")
+            var materialsCount = 0
+            var materialsDeletedCount = 0
+            
+            if (materialsArray != null) {
+                for (i in 0 until materialsArray.length()) {
+                    val matObj = materialsArray.getJSONObject(i)
+                    val name = matObj.getString("name")
+                    val isDeleted = matObj.optBoolean("deleted", false)
+                    
+                    val existingList = repository.allMaterials.first()
+                    val existing = existingList.find { it.name.trim().lowercase() == name.trim().lowercase() }
+                    
+                    if (isDeleted) {
+                        if (existing != null) {
+                            repository.deleteMaterial(existing.id)
+                            materialsDeletedCount++
+                        }
+                    } else {
+                        val pricePerUnit = matObj.getDouble("pricePerUnit")
+                        val unit = matObj.getString("unit")
+                        val category = matObj.getString("category")
+                        val isDefault = matObj.optBoolean("isDefault", false)
+                        
+                        if (existing != null) {
+                            val updated = existing.copy(
+                                pricePerUnit = pricePerUnit,
+                                unit = unit,
+                                category = category,
+                                isDefault = isDefault
+                            )
+                            repository.saveMaterial(updated)
+                        } else {
+                            val newMat = Material(
+                                name = name,
+                                pricePerUnit = pricePerUnit,
+                                unit = unit,
+                                category = category,
+                                isDefault = isDefault
+                            )
+                            repository.saveMaterial(newMat)
+                        }
+                        materialsCount++
+                    }
+                }
+            }
+            
+            // 2. Complex products
+            val complexArray = root.optJSONArray("complexProducts")
+            var complexCount = 0
+            var complexDeletedCount = 0
+            
+            if (complexArray != null) {
+                for (i in 0 until complexArray.length()) {
+                    val cpObj = complexArray.getJSONObject(i)
+                    val name = cpObj.getString("name")
+                    val isDeleted = cpObj.optBoolean("deleted", false)
+                    
+                    val existingComplexList = repository.allComplexProducts.first()
+                    val existing = existingComplexList.find { it.name.trim().lowercase() == name.trim().lowercase() }
+                    
+                    if (isDeleted) {
+                        if (existing != null) {
+                            repository.deleteComplexProduct(existing.id)
+                            complexDeletedCount++
+                        }
+                    } else {
+                        val description = cpObj.optString("description", "")
+                        val isDefault = cpObj.optBoolean("isDefault", false)
+                        
+                        val freshMaterials = repository.allMaterials.first()
+                        val componentsJson = cpObj.optJSONArray("components")
+                        val parsedComponents = mutableListOf<ComplexProductComponent>()
+                        
+                        if (componentsJson != null) {
+                            for (j in 0 until componentsJson.length()) {
+                                val compObj = componentsJson.getJSONObject(j)
+                                val matName = compObj.getString("materialName")
+                                val quantity = compObj.getDouble("quantity")
+                                
+                                val matchedMat = freshMaterials.find { it.name.trim().lowercase() == matName.trim().lowercase() }
+                                if (matchedMat != null) {
+                                    parsedComponents.add(
+                                        ComplexProductComponent(
+                                            productId = existing?.id ?: 0,
+                                            materialId = matchedMat.id,
+                                            quantity = quantity
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                        
+                        if (existing != null) {
+                            repository.saveComplexProduct(
+                                existing.copy(description = description, isDefault = isDefault),
+                                parsedComponents
+                            )
+                        } else {
+                            repository.saveComplexProduct(
+                                ComplexProduct(name = name, description = description, isDefault = isDefault),
+                                parsedComponents
+                            )
+                        }
+                        complexCount++
+                    }
+                }
+            }
+            
+            val summaryParts = mutableListOf<String>()
+            if (materialsCount > 0) summaryParts.add("dodano/zaktualizowano $materialsCount prostych")
+            if (materialsDeletedCount > 0) summaryParts.add("usunięto $materialsDeletedCount prostych")
+            if (complexCount > 0) summaryParts.add("dodano/zaktualizowano $complexCount złożonych")
+            if (complexDeletedCount > 0) summaryParts.add("usunięto $complexDeletedCount złożonych")
+            
+            val summary = if (summaryParts.isEmpty()) "brak zmian" else summaryParts.joinToString(", ")
+            ImportResult(true, summary)
+        } catch (e: Exception) {
+            ImportResult(false, e.message ?: "Błąd parsowania pliku JSON")
+        }
+    }
+
     // ViewModel Factory
     class Factory(private val application: Application) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")

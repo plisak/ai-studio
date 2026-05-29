@@ -11,11 +11,13 @@ android {
   compileSdk { version = release(36) { minorApiLevel = 1 } }
 
   defaultConfig {
+    // Rule 1: Maintain the exact package name (applicationId) to avoid conflicts and match play store
     applicationId = "com.aistudio.kalkulatorzlomu.xjmkpv"
     minSdk = 24
     targetSdk = 36
-    versionCode = 1
-    versionName = "1.0"
+    // Rule 2: Increment the version number so it is strictly greater than the Play Console version
+    versionCode = 5
+    versionName = "1.4"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

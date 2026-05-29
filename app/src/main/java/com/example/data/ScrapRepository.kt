@@ -223,4 +223,16 @@ class ScrapRepository(private val scrapDao: ScrapDao) {
     fun getItemsForCalculation(id: Long): Flow<List<CalculationItem>> {
         return scrapDao.getItemsForCalculation(id)
     }
+
+    suspend fun clearAllHistory() {
+        scrapDao.clearAllSavedCalculations()
+        scrapDao.clearAllSavedCalculationItems()
+    }
+
+    suspend fun clearPriceList() {
+        scrapDao.clearAllMaterials()
+        scrapDao.clearAllComplexProducts()
+        scrapDao.clearAllComplexProductComponents()
+        scrapDao.clearDraft() // Also clear live draft to avoid broken references
+    }
 }

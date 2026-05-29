@@ -83,4 +83,20 @@ interface ScrapDao {
 
     @Query("DELETE FROM complex_product_components WHERE productId = :productId")
     suspend fun deleteComponentsForProduct(productId: Int)
+
+    // --- ADMINISTRATIVE CLEARING METHODS ---
+    @Query("DELETE FROM saved_calculations")
+    suspend fun clearAllSavedCalculations()
+
+    @Query("DELETE FROM calculation_items WHERE calculationId != 0")
+    suspend fun clearAllSavedCalculationItems()
+
+    @Query("DELETE FROM materials")
+    suspend fun clearAllMaterials()
+
+    @Query("DELETE FROM complex_products")
+    suspend fun clearAllComplexProducts()
+
+    @Query("DELETE FROM complex_product_components")
+    suspend fun clearAllComplexProductComponents()
 }

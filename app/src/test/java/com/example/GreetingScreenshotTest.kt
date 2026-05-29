@@ -34,6 +34,7 @@ class GreetingScreenshotTest {
             materialUnit = "g",
             quantity = 2.5
           ),
+          complexProducts = emptyList(),
           onDelete = {}
         )
       }
