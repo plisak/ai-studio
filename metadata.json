@@ -1,0 +1,6 @@
+{
+  "name": "Kalkulator Złomu",
+  "description": "Wygodny kalkulator cen złomu, metali szlachetnych i kolorowych z własną bazą cen i funkcją sumowania wielu pozycji jednocześnie.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
