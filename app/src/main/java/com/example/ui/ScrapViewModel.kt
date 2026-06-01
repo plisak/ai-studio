@@ -473,6 +473,205 @@ class ScrapViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun escapeCsv(value: String): String {
+        val containsSemicolon = value.contains(";")
+        val containsQuote = value.contains("\"")
+        val containsNewLine = value.contains("\n") || value.contains("\r")
+        if (containsSemicolon || containsQuote || containsNewLine) {
+            val escaped = value.replace("\"", "\"\"")
+            return "\"$escaped\""
+        }
+        return value
+    }
+
+    private fun splitCsvLine(line: String): List<String> {
+        val result = mutableListOf<String>()
+        val cur = StringBuilder()
+        var inQuotes = false
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            if (c == '"') {
+                if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
+                    cur.append('"')
+                    i++
+                } else {
+                    inQuotes = !inQuotes
+                }
+            } else if (c == ';' && !inQuotes) {
+                result.add(cur.toString())
+                cur.setLength(0)
+            } else {
+                cur.append(c)
+            }
+            i++
+        }
+        result.add(cur.toString())
+        return result
+    }
+
+    suspend fun exportPriceListCsv(): String {
+        val materialsList = repository.allMaterials.first()
+        val complexList = repository.allComplexProducts.first()
+        val componentsList = repository.allComplexProductComponents.first()
+
+        val sb = StringBuilder()
+        sb.append("# Instrukcja: Typ to METAL (prosty materiał) lub ZESTAW (złożony produkt). Separator kolumn to średnik (;)\n")
+        sb.append("# Dla METAL uzupełnij: Nazwa, Cena, Jednostka (np. kg, g, szt.), Kategoria (np. Metale Kolorowe, Metale Szlachetne, Stal i Żeliwo, Inne)\n")
+        sb.append("# Dla ZESTAW uzupełnij: Nazwa, Opis, Skład w formacie NazwaMateriału:Masa, oddzielone przecinkiem (np. Miedź Świecąca:0.7, Cynk:0.3)\n")
+        sb.append("Typ;Nazwa;Cena;Jednostka;Kategoria;Opis;Sklad\n")
+
+        // 1. Materials
+        for (m in materialsList) {
+            val typ = "METAL"
+            val nazwa = escapeCsv(m.name)
+            val cena = m.pricePerUnit.toString().replace(".", ",") // Excel decimal point in Europe (Poland)
+            val jednostka = escapeCsv(m.unit)
+            val kategoria = escapeCsv(m.category)
+            val opis = ""
+            val sklad = ""
+            sb.append("$typ;$nazwa;$cena;$jednostka;$kategoria;$opis;$sklad\n")
+        }
+
+        // 2. Complex products
+        for (cp in complexList) {
+            val typ = "ZESTAW"
+            val nazwa = escapeCsv(cp.name)
+            val cena = ""
+            val jednostka = ""
+            val kategoria = ""
+            val opis = escapeCsv(cp.description)
+            
+            val matchComps = componentsList.filter { it.productId == cp.id }
+            val compPairs = mutableListOf<String>()
+            for (comp in matchComps) {
+                val matName = materialsList.find { it.id == comp.materialId }?.name ?: ""
+                if (matName.isNotEmpty()) {
+                    compPairs.add("$matName:${comp.quantity}")
+                }
+            }
+            val sklad = escapeCsv(compPairs.joinToString(", "))
+            sb.append("$typ;$nazwa;$cena;$jednostka;$kategoria;$opis;$sklad\n")
+        }
+
+        return sb.toString()
+    }
+
+    suspend fun importPriceListCsv(csvString: String): ImportResult {
+        return try {
+            val lines = csvString.split(Regex("\\r?\\n"))
+            var materialsCount = 0
+            var complexCount = 0
+
+            for (line in lines) {
+                val trimmed = line.trim()
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) {
+                    continue
+                }
+                
+                val parts = splitCsvLine(trimmed)
+                if (parts.size < 2) continue
+                
+                val typ = parts[0].trim().uppercase()
+                // If it's a header line, skip it
+                if (typ == "TYP" && parts[1].trim().uppercase() == "NAZWA") {
+                    continue
+                }
+
+                val name = parts[1].trim()
+                if (name.isEmpty()) continue
+
+                if (typ == "METAL" || typ == "PROSTY" || typ == "MATERIAL") {
+                    // It's a simple material
+                    val cenaStr = parts.getOrNull(2)?.trim()?.replace(",", ".") ?: "0.0"
+                    val cena = cenaStr.toDoubleOrNull() ?: 0.0
+                    val jednostka = parts.getOrNull(3)?.trim()?.ifBlank { "kg" } ?: "kg"
+                    val kategoria = parts.getOrNull(4)?.trim()?.ifBlank { "Metale Kolorowe" } ?: "Metale Kolorowe"
+
+                    val existingList = repository.allMaterials.first()
+                    val existing = existingList.find { it.name.trim().lowercase() == name.lowercase() }
+
+                    if (existing != null) {
+                        val updated = existing.copy(
+                            pricePerUnit = cena,
+                            unit = jednostka,
+                            category = kategoria
+                        )
+                        repository.saveMaterial(updated)
+                    } else {
+                        val newMat = Material(
+                            name = name,
+                            pricePerUnit = cena,
+                            unit = jednostka,
+                            category = kategoria,
+                            isDefault = false
+                        )
+                        repository.saveMaterial(newMat)
+                    }
+                    materialsCount++
+                } else if (typ == "ZESTAW" || typ == "ZLOZONY" || typ == "PRODUKT_ZLOZONY") {
+                    // It's a complex product
+                    val opis = parts.getOrNull(5)?.trim() ?: ""
+                    val skladStr = parts.getOrNull(6)?.trim() ?: ""
+
+                    val existingComplexList = repository.allComplexProducts.first()
+                    val existing = existingComplexList.find { it.name.trim().lowercase() == name.lowercase() }
+
+                    val freshMaterials = repository.allMaterials.first()
+                    val parsedComponents = mutableListOf<ComplexProductComponent>()
+
+                    if (skladStr.isNotEmpty()) {
+                        // Sklad format: "Miedź:0.5, Cynk:0.5"
+                        val compParts = skladStr.split(Regex("[,|]"))
+                        for (cpPart in compParts) {
+                            val singleComp = cpPart.trim()
+                            if (singleComp.isEmpty()) continue
+                            val colonIdx = singleComp.lastIndexOf(':')
+                            if (colonIdx != -1) {
+                                val matName = singleComp.substring(0, colonIdx).trim()
+                                val qtyStr = singleComp.substring(colonIdx + 1).trim().replace(",", ".")
+                                val qty = qtyStr.toDoubleOrNull() ?: 0.0
+                                
+                                val matchedMat = freshMaterials.find { it.name.trim().lowercase() == matName.lowercase() }
+                                if (matchedMat != null) {
+                                    parsedComponents.add(
+                                        ComplexProductComponent(
+                                            productId = existing?.id ?: 0,
+                                            materialId = matchedMat.id,
+                                            quantity = qty
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    if (existing != null) {
+                        repository.saveComplexProduct(
+                            existing.copy(description = opis),
+                            parsedComponents
+                        )
+                    } else {
+                        repository.saveComplexProduct(
+                            ComplexProduct(name = name, description = opis, isDefault = false),
+                            parsedComponents
+                        )
+                    }
+                    complexCount++
+                }
+            }
+
+            val summaryParts = mutableListOf<String>()
+            if (materialsCount > 0) summaryParts.add("dodano/zaktualizowano $materialsCount prostych")
+            if (complexCount > 0) summaryParts.add("dodano/zaktualizowano $complexCount złożonych")
+            
+            val summary = if (summaryParts.isEmpty()) "brak zmian" else summaryParts.joinToString(", ")
+            ImportResult(true, summary)
+        } catch (e: Exception) {
+            ImportResult(false, e.message ?: "Błąd parsowania pliku CSV")
+        }
+    }
+
     // ViewModel Factory
     class Factory(private val application: Application) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")

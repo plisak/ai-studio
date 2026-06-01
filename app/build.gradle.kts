@@ -16,8 +16,8 @@ android {
     minSdk = 24
     targetSdk = 36
     // Rule 2: Increment the version number so it is strictly greater than the Play Console version
-    versionCode = 5
-    versionName = "1.4"
+    versionCode = 6
+    versionName = "1.5"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }

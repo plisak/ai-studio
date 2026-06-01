@@ -10,6 +10,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -73,6 +75,20 @@ class CreateJsonDocumentContract : ActivityResultContract<String, android.net.Ur
     }
 }
 
+class CreateCsvDocumentContract : ActivityResultContract<String, android.net.Uri?>() {
+    override fun createIntent(context: android.content.Context, input: String): Intent {
+        return Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "text/csv"
+            putExtra(Intent.EXTRA_TITLE, input)
+        }
+    }
+
+    override fun parseResult(resultCode: Int, intent: Intent?): android.net.Uri? {
+        return if (intent == null || resultCode != Activity.RESULT_OK) null else intent.data
+    }
+}
+
 class MainActivity : ComponentActivity() {
     private val viewModel: ScrapViewModel by viewModels {
         ScrapViewModel.Factory(application)
@@ -90,6 +106,18 @@ class MainActivity : ComponentActivity() {
         uri?.let { loadJsonFromUri(it) }
     }
 
+    private val exportPriceListCsvLauncher = registerForActivityResult(
+        CreateCsvDocumentContract()
+    ) { uri ->
+        uri?.let { saveCsvToUri(it) }
+    }
+
+    private val importPriceListCsvLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri?.let { loadCsvFromUri(it) }
+    }
+
     fun triggerExport() {
         try {
             exportPriceListLauncher.launch("cennik_zlomu.json")
@@ -101,6 +129,22 @@ class MainActivity : ComponentActivity() {
     fun triggerImport() {
         try {
             importPriceListLauncher.launch("application/json")
+        } catch (e: Exception) {
+            Toast.makeText(this, "Błąd systemowy: Brak aplikacji do obsługi wyboru plików (GetContent).", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun triggerExportCsv() {
+        try {
+            exportPriceListCsvLauncher.launch("cennik_zlomu.csv")
+        } catch (e: Exception) {
+            Toast.makeText(this, "Błąd systemowy: Brak aplikacji do obsługi eksportu (ACTION_CREATE_DOCUMENT).", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun triggerImportCsv() {
+        try {
+            importPriceListCsvLauncher.launch("*/*")
         } catch (e: Exception) {
             Toast.makeText(this, "Błąd systemowy: Brak aplikacji do obsługi wyboru plików (GetContent).", Toast.LENGTH_LONG).show()
         }
@@ -134,6 +178,38 @@ class MainActivity : ComponentActivity() {
                 }
             } catch (e: Exception) {
                 Toast.makeText(this@MainActivity, "Błąd odczytu pliku: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun saveCsvToUri(uri: android.net.Uri) {
+        lifecycleScope.launch {
+            try {
+                val csvString = viewModel.exportPriceListCsv()
+                contentResolver.openOutputStream(uri)?.use { outputStream ->
+                    outputStream.write(csvString.toByteArray(Charsets.UTF_8))
+                }
+                Toast.makeText(this@MainActivity, "Cennik CSV został pomyślnie wyeksportowany!", Toast.LENGTH_LONG).show()
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Błąd eksportu CSV: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun loadCsvFromUri(uri: android.net.Uri) {
+        lifecycleScope.launch {
+            try {
+                contentResolver.openInputStream(uri)?.use { inputStream ->
+                    val csvString = inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+                    val result = viewModel.importPriceListCsv(csvString)
+                    if (result.success) {
+                        Toast.makeText(this@MainActivity, "Pomyślnie zaimportowano CSV: ${result.message}", Toast.LENGTH_LONG).show()
+                    } else {
+                        Toast.makeText(this@MainActivity, "Błąd importu CSV: ${result.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "Błąd odczytu pliku CSV: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -308,6 +384,7 @@ fun DatabaseManagementDialog(
 
     var showClearHistoryConfirm by remember { mutableStateOf(false) }
     var showClearPriceListConfirm by remember { mutableStateOf(false) }
+    var showPrivacyDialog by remember { mutableStateOf(false) }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
@@ -318,10 +395,12 @@ fun DatabaseManagementDialog(
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
+            val scrollState = rememberScrollState()
             Column(
                 modifier = Modifier
                     .padding(24.dp)
-                    .fillMaxWidth(),
+                    .fillMaxWidth()
+                    .verticalScroll(scrollState),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 // Header
@@ -345,16 +424,16 @@ fun DatabaseManagementDialog(
 
                 HorizontalDivider()
 
-                // Section 1: Backup (Export / Import)
+                // Section 1: Backup (Export / Import - JSON)
                 Text(
-                    text = "Kopia zapasowa i cennik",
+                    text = "Pełna kopia zapasowa (JSON)",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary
                 )
 
                 Text(
-                    text = "Wyeksportuj obecny cennik (produkty proste i złożone) do pliku JSON lub zaimportuj wcześniejszy plik, aby zsynchronizować zmiany.",
+                    text = "Wyeksportuj lub zaimportuj pełną kopię zapasową bazy danych aplikacji w formacie JSON.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -379,7 +458,7 @@ fun DatabaseManagementDialog(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Eksportuj")
+                        Text("Eksportuj JSON")
                     }
 
                     OutlinedButton(
@@ -398,7 +477,129 @@ fun DatabaseManagementDialog(
                             modifier = Modifier.size(18.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Importuj")
+                        Text("Importuj JSON")
+                    }
+                }
+
+                HorizontalDivider()
+
+                // Section 1b: CSV Price editor for Excel / Google Sheets
+                Text(
+                    text = "Edycja cennika w Excel / Arkusze (CSV)",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Text(
+                    text = "Szybki eksport cennika do czytelnego pliku CSV (rozdzielany średnikami, z obsługą polskich przecinków dziesiętnych) do bezpośredniej edycji w programie Excel lub Arkusze Google na telefonie.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            activity?.triggerExportCsv()
+                            onDismiss()
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("export_csv_button"),
+                        contentPadding = PaddingValues(vertical = 12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Share,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Eksportuj CSV")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            activity?.triggerImportCsv()
+                            onDismiss()
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("import_csv_button"),
+                        contentPadding = PaddingValues(vertical = 12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Send,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Importuj CSV")
+                    }
+                }
+
+                HorizontalDivider()
+
+                // Section 1c: Privacy Policy and GitHub
+                Text(
+                    text = "Polityka prywatności i kod źródłowy",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Text(
+                    text = "Aplikacja w pełni dba o Twoją prywatność. Wszystkie dane są bezpiecznie zapisywane wyłącznie na Twoim urządzeniu.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            showPrivacyDialog = true
+                        },
+                        modifier = Modifier
+                            .weight(1.5f)
+                            .testTag("show_privacy_policy_button"),
+                        contentPadding = PaddingValues(vertical = 12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Polityka")
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                uriHandler.openUri("https://github.com/lisak-przemyslaw/kalkulator-zlomu")
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Nie można otworzyć linku", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("open_github_button"),
+                        contentPadding = PaddingValues(vertical = 12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Share,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("GitHub")
                     }
                 }
 
@@ -513,6 +714,66 @@ fun DatabaseManagementDialog(
             dismissButton = {
                 TextButton(onClick = { showClearPriceListConfirm = false }) {
                     Text("Anuluj")
+                }
+            }
+        )
+    }
+
+    if (showPrivacyDialog) {
+        AlertDialog(
+            onDismissRequest = { showPrivacyDialog = false },
+            title = {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text("Polityka Prywatności")
+                }
+            },
+            text = {
+                val scrollState2 = rememberScrollState()
+                Column(
+                    modifier = Modifier
+                        .verticalScroll(scrollState2)
+                        .padding(vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Aplikacja „Kalkulator Złomu” stawia Twoją prywatność na pierwszym miejscu. Poniżej znajdują się najważniejsze informacje:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "1. Gromadzenie danych:\nAplikacja NIE zbiera, nie przechowuje ani nie przesyła żadnych danych osobowych, telemetrycznych ani identyfikacyjnych użytkownika. Działa w pełni offline, nie wymaga logowania ani tworzenia konta.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "2. Przechowywanie danych lokalnych:\nWszystkie wprowadzone dane (cenniki, kalkulacje, historia) zapisywane są wyłącznie lokalnie na Twoim urządzeniu w bezpiecznej bazie SQL (Room). Usunięcie aplikacji trwale usuwa te dane.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "3. Ręczny import/eksport (Kopia):\nFunkcje importu i eksportu bazy danych (JSON) lub cennika (CSV) są inicjowane wyłącznie przez użytkownika. Wygenerowane pliki zostają zapisane we wskazanej przez Ciebie lokalizacji i nie opuszczają Twojego urządzenia bez Twojej wiedzy.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "4. Uprawnienia systemowe:\nAplikacja prosi o dostęp do pamięci urządzenia (System Document Provider) wyłącznie w momencie, gdy zechcesz ręcznie wyeksportować lub zaimportować plik. Brak stałego dostępu w tle.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "Kod źródłowy aplikacji jest w pełni otwarty i publicznie dostępny na GitHub: https://github.com/lisak-przemyslaw/kalkulator-zlomu\n\nKontakt: lisak.przemyslaw@gmail.com",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            confirmButton = {
+                Button(onClick = { showPrivacyDialog = false }) {
+                    Text("Zamknij")
                 }
             }
         )
